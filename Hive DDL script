@@ -1,0 +1,202 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[1]:
+
+
+import re
+
+#file is a text file with the select statement generated from SAP HANA Studio
+filename = 'PaymentPlan_v1'
+directory = '/tmp/aw_hive_stg/'
+database = 'awinternal'
+num_keyColumns = 3
+possible_aggregations=('sum','avg','count','min','max')
+date_columns=['"StopDateBudgetBillPayment"','"ChangedOn"','"StartOfBudgeBillPeriod"','"EndOfBudgetBillingPeriod"','"DateOnWhichRecordWasCreated"']
+
+
+# In[2]:
+
+
+#functions for searching through text
+def between(value, a, b):
+    # Find and validate before-part.
+    pos_a = value.find(a)
+    if pos_a == -1: return ""
+    # Find and validate after part.
+    pos_b = value.rfind(b)
+    if pos_b == -1: return ""
+    # Return middle part.
+    adjusted_pos_a = pos_a + len(a)
+    if adjusted_pos_a >= pos_b: return ""
+    return value[adjusted_pos_a:pos_b]
+
+def after(value, a):
+    # Find and validate first part.
+    pos_a = value.rfind(a)
+    if pos_a == -1: return ""
+    # Returns chars after the found string.
+    adjusted_pos_a = pos_a + len(a)
+    if adjusted_pos_a >= len(value): return ""
+    return value[adjusted_pos_a:]
+
+#function for finding tablename and columns
+def find_tablename(select):
+    tablename=between(select,"/",'" ')
+    return tablename
+
+def find_columns(select):
+    pattern = re.compile("^\s+|\s*,\s*|\s+$")
+    columns_array = [x for x in pattern.split(between(select,'SELECT ',' FROM')) if x]
+    columns=[]
+    for item in columns_array:
+        if ' AS ' in item:
+            item = after(item,' AS ')
+        columns.append(item)
+    return columns
+
+#function for nifi select statement
+def create_select_columns(columns):
+    select_statement =''
+    for item in find_columns(select):
+        #Last column without comma
+        if item == find_columns(select)[-1]:
+            if ' AS ' in item:
+                item = after(item,' AS ')
+            select_statement+=item
+        else:   
+            if ' AS ' in item:
+                item = after(item,' AS ')
+            if item in date_columns:
+                item = 'CAST(CASE WHEN '+item+' != \'\' THEN (TO_NVARCHAR('+item                +', \'YYYY-MM-DD\')) ELSE NULL END AS NVARCHAR) AS '+item
+            select_statement+=item+','
+    return select_statement
+
+#function for creating columns in staging table
+def convert_stg_columns(columns):
+    create_stg_columns = ""
+    for line in columns:
+        if line == columns[-1]:
+            if line in date_columns:
+                line = re.sub('\s+','',line)
+                line = re.sub('"$',' date,\n',line)
+                line = re.sub('"','',line)
+            else:
+                line = re.sub('\s+','',line)
+                line = re.sub('"$',' string\n',line)
+                line = re.sub('"','',line)
+        else:
+            if line in date_columns:
+                line = re.sub('\s+','',line)
+                line = re.sub('"$',' date,\n',line)
+                line = re.sub('"','',line)
+            else:
+                line = re.sub('\s+','',line)
+                line = re.sub('"$',' string,\n',line)
+                line = re.sub('"','',line)
+        create_stg_columns+=line
+    return create_stg_columns
+
+def convert_delta_columns(columns):
+    create_delta_columns = ''
+    for line in columns:
+        if line in date_columns:
+            line = re.sub('\s+','',line)
+            line = re.sub('"$',' date,\n',line)
+            line = re.sub('^"','',line)
+        else:
+            line = re.sub('\s+','',line)
+            line = re.sub('"$',' string,\n',line)
+            line = re.sub('^"','',line)
+        create_delta_columns+=line
+    return create_delta_columns
+
+#functions for parts of insert statement
+def create_insert_columns(columns):
+    insert_columns = ''
+    for line in columns:
+        #removing whitespace
+        line = re.sub('\s+','',line)
+        #replace quotes at end
+        line = re.sub('"$',',\n',line)
+        #replace quotes at beginning
+        line = re.sub('^"','stg_'+tablename+'.',line)
+        insert_columns+=line
+    return insert_columns
+
+def create_md5(columns):
+    insert_md5 = ''
+    for line in columns:
+        if line==columns[-1]:
+            line = re.sub('^"',"(nvl(stg_"+tablename+'.',line)
+            line = re.sub('"$',',"null"))',line)            
+        else:
+            line = re.sub('^"',"(nvl(stg_"+tablename+'.',line)
+            line = re.sub('"$',',"null")),\n',line)
+        insert_md5+=line
+    return insert_md5
+
+#functions for parts of merge upsert statement
+def create_merge_keys(num_keyColumns, columns):
+    merge_keys = '('
+    for i in range(num_keyColumns):
+        line = 'nvl('+tablename+'.'+columns[i].strip()[1:-1]+',"")=nvl('+tablename+'_delta.'+columns[i].strip()[1:-1]+',"")'
+        if i+1 < num_keyColumns:
+            line+=' and\n'
+        else:
+            line+=')\n'
+        merge_keys += line
+    return merge_keys
+
+def create_merge_update(columns):
+    sentence = ''
+    for line in columns:
+        #removing bucketed column
+        if line == columns[1]:
+            continue
+        line = re.sub('^"',line[:-1]+'='+tablename+'_delta.',line)
+        line = re.sub('"','',line).strip()
+        #adding comma to last column
+        if line[-1] != ',':
+            line+=','
+        sentence+=line+'\n'
+    sentence+='checksum='+tablename+'_delta.checksum,\nwatermark=CURRENT_TIMESTAMP'
+    return(sentence)
+
+def create_merge_insert(columns):
+    sentence = ''
+    for line in columns:
+        line = re.sub('^"',tablename+'_delta.',line)
+        line = re.sub('"$',',\n',line)
+        sentence+=line
+    sentence+=tablename+'_delta.checksum,\nCURRENT_TIMESTAMP'
+    return(sentence)
+
+
+# In[3]:
+
+
+with open(filename) as file:
+    select = file.read()
+hana_path=between(select,"FROM ",'" ')+'"'
+tablename=find_tablename(select)
+file_path = directory + 'stg_' + tablename.lower() + "/';"
+columns=find_columns(select)
+bucketColumn = (columns[1].strip())[1:-1]
+tblproperties = "'compactor.mapreduce.map.memory.mb'='2048',\n'compactorthreshold.hive.compactor.delta.num.threshold'='1',\n'compactorthreshold.hive.compactor.delta.pct.threshold'='0.5',\n'transactional'='true'"
+
+
+# In[4]:
+
+
+#DDL for creating tables (stg,delta,base)
+create_stg_table = "CREATE EXTERNAL TABLE IF NOT EXISTS " + database + ".stg_" + tablename + " (\n" + convert_stg_columns(columns) + ")\n" + 'STORED AS orc\n' + "LOCATION '" + file_path
+create_delta_table = "CREATE TABLE " + database + '.' + tablename + "_delta (\n" + convert_delta_columns(columns) + "checksum string,\nwatermark timestamp\n)\nCLUSTERED BY (\n" + bucketColumn + '\n)\nINTO 32 BUCKETS\nSTORED AS orc\nTBLPROPERTIES(\n' + tblproperties + ');'
+create_base_table = "CREATE TABLE " + database + '.' + tablename + "(\n" + convert_delta_columns(columns) + "checksum string,\nwatermark timestamp\n)\nCLUSTERED BY (\n" + bucketColumn + '\n)\nINTO 32 BUCKETS\nSTORED AS orc\nTBLPROPERTIES(\n' + tblproperties + ');'
+
+#DDL for insert and merge statements
+insert_statement = 'INSERT INTO '+database+'.'+tablename+'_delta SELECT DISTINCT\n' +create_insert_columns(columns)+ 'md5(CONCAT(\n'+create_md5(columns)+')),\nCURRENT_TIMESTAMP\nFROM '+database+'.'+'stg_'+tablename+';'
+
+merge_statement = 'MERGE INTO '+database+'.'+tablename+' AS '+tablename+' USING '+database+'.'+tablename+'_delta AS '+tablename+'_delta ON\n'+create_merge_keys(num_keyColumns,columns)+'WHEN MATCHED AND '+tablename+'.checksum <> '+tablename+'_delta.checksum THEN UPDATE SET\n'+create_merge_update(columns)+'\nWHEN NOT MATCHED THEN INSERT VALUES(\n'+create_merge_insert(columns)+');'
+
+truncate_statement = 'TRUNCATE TABLE '+database+'.'+tablename+'_delta;'
