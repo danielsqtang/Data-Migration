@@ -1,23 +1,14 @@
 #!/usr/bin/env python
 # coding: utf-8
-
-# In[1]:
-
-
 import re
 
 #file is a text file with the select statement generated from SAP HANA Studio
-filename = 'PaymentPlan_v1'
-directory = '/tmp/aw_hive_stg/'
-database = 'awinternal'
+filename = 'file.txt'
+directory = '/tmp/stg/'
+database = 'internal'
 num_keyColumns = 3
 possible_aggregations=('sum','avg','count','min','max')
-date_columns=['"StopDateBudgetBillPayment"','"ChangedOn"','"StartOfBudgeBillPeriod"','"EndOfBudgetBillingPeriod"','"DateOnWhichRecordWasCreated"']
-
-
-# In[2]:
-
-
+date_columns=[]
 #functions for searching through text
 def between(value, a, b):
     # Find and validate before-part.
@@ -68,7 +59,8 @@ def create_select_columns(columns):
             if ' AS ' in item:
                 item = after(item,' AS ')
             if item in date_columns:
-                item = 'CAST(CASE WHEN '+item+' != \'\' THEN (TO_NVARCHAR('+item                +', \'YYYY-MM-DD\')) ELSE NULL END AS NVARCHAR) AS '+item
+                item = 'CAST(CASE WHEN '+item+' != \'\' THEN (TO_NVARCHAR('+item\
+                +', \'YYYY-MM-DD\')) ELSE NULL END AS NVARCHAR) AS '+item
             select_statement+=item+','
     return select_statement
 
@@ -171,32 +163,26 @@ def create_merge_insert(columns):
         sentence+=line
     sentence+=tablename+'_delta.checksum,\nCURRENT_TIMESTAMP'
     return(sentence)
-
-
-# In[3]:
-
-
 with open(filename) as file:
     select = file.read()
 hana_path=between(select,"FROM ",'" ')+'"'
-tablename=find_tablename(select)
+tablename=find_tablename(select).lower()
 file_path = directory + 'stg_' + tablename.lower() + "/';"
 columns=find_columns(select)
 bucketColumn = (columns[1].strip())[1:-1]
 tblproperties = "'compactor.mapreduce.map.memory.mb'='2048',\n'compactorthreshold.hive.compactor.delta.num.threshold'='1',\n'compactorthreshold.hive.compactor.delta.pct.threshold'='0.5',\n'transactional'='true'"
-
-
-# In[4]:
-
-
 #DDL for creating tables (stg,delta,base)
 create_stg_table = "CREATE EXTERNAL TABLE IF NOT EXISTS " + database + ".stg_" + tablename + " (\n" + convert_stg_columns(columns) + ")\n" + 'STORED AS orc\n' + "LOCATION '" + file_path
 create_delta_table = "CREATE TABLE " + database + '.' + tablename + "_delta (\n" + convert_delta_columns(columns) + "checksum string,\nwatermark timestamp\n)\nCLUSTERED BY (\n" + bucketColumn + '\n)\nINTO 32 BUCKETS\nSTORED AS orc\nTBLPROPERTIES(\n' + tblproperties + ');'
 create_base_table = "CREATE TABLE " + database + '.' + tablename + "(\n" + convert_delta_columns(columns) + "checksum string,\nwatermark timestamp\n)\nCLUSTERED BY (\n" + bucketColumn + '\n)\nINTO 32 BUCKETS\nSTORED AS orc\nTBLPROPERTIES(\n' + tblproperties + ');'
 
 #DDL for insert and merge statements
-insert_statement = 'INSERT INTO '+database+'.'+tablename+'_delta SELECT DISTINCT\n' +create_insert_columns(columns)+ 'md5(CONCAT(\n'+create_md5(columns)+')),\nCURRENT_TIMESTAMP\nFROM '+database+'.'+'stg_'+tablename+';'
+insert_statement = 'INSERT INTO '+database+'.'+tablename+'_delta SELECT DISTINCT\n' \
++create_insert_columns(columns)+ 'md5(CONCAT(\n'+create_md5(columns)+')),\nCURRENT_TIMESTAMP\nFROM '+database+'.'+'stg_'+tablename+';'
 
-merge_statement = 'MERGE INTO '+database+'.'+tablename+' AS '+tablename+' USING '+database+'.'+tablename+'_delta AS '+tablename+'_delta ON\n'+create_merge_keys(num_keyColumns,columns)+'WHEN MATCHED AND '+tablename+'.checksum <> '+tablename+'_delta.checksum THEN UPDATE SET\n'+create_merge_update(columns)+'\nWHEN NOT MATCHED THEN INSERT VALUES(\n'+create_merge_insert(columns)+');'
+merge_statement = 'MERGE INTO '+database+'.'+tablename+' AS '+tablename+' USING '+database+'.'+tablename+'_delta AS '+tablename+'_delta ON\n'\
++create_merge_keys(num_keyColumns,columns)+'WHEN MATCHED AND '+tablename+'.checksum <> '+tablename+'_delta.checksum THEN UPDATE SET\n'+create_merge_update(columns)\
++'\nWHEN NOT MATCHED THEN INSERT VALUES(\n'+create_merge_insert(columns)+');'
 
 truncate_statement = 'TRUNCATE TABLE '+database+'.'+tablename+'_delta;'
+compaction_statement = 'ALTER TABLE '+database+'.'+tablename+' COMPACT \'minor\';'
