@@ -1,0 +1,9 @@
+import pyhdb
+import pandas as pd
+username='username'
+passwd='password'
+connection = pyhdb.connect(host='hostname',port=port,user=username,password=passwd)
+hana_view_name='"_SYS_BIC"."Package.Tablename"'
+cursor = connection.cursor()
+cursor.execute('SELECT * FROM '+hana_view_name+' limit 10')
+data=cursor.fetchall()
